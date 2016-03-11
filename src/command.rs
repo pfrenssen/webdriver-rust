@@ -417,7 +417,6 @@ impl ToJson for NewSessionParameters {
     }
 }
 
-
 #[derive(PartialEq)]
 pub struct GetParameters {
     pub url: String
