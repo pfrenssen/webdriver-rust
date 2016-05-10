@@ -49,11 +49,12 @@ pub enum WebDriverCommand<T: WebDriverExtensionCommand> {
     DeleteCookies,
     DeleteCookie(String),
     SetTimeouts(TimeoutsParameters),
-    //Actions(ActionsParameters),
     ElementClick(WebElement),
     ElementTap(WebElement),
     ElementClear(WebElement),
     ElementSendKeys(WebElement, SendKeysParameters),
+    PerformActions(ActionsParameters),
+    DeleteActions,
     DismissAlert,
     AcceptAlert,
     GetAlertText,
@@ -287,6 +288,13 @@ impl <U: WebDriverExtensionRoute> WebDriverMessage<U> {
                                     "Missing name parameter").to_string();
                 WebDriverCommand::DeleteCookie(name)
             },
+            Route::PerformActions => {
+                let parameters: ActionsParameters = try!(Parameters::from_json(&body_data));
+                WebDriverCommand::PerformActions(parameters)
+            },
+            Route::DeleteActions => {
+                WebDriverCommand::DeleteActions
+            },
             Route::DismissAlert => {
                 WebDriverCommand::DismissAlert
             },
@@ -332,7 +340,7 @@ impl <U:WebDriverExtensionRoute> ToJson for WebDriverMessage<U> {
             WebDriverCommand::DismissAlert | WebDriverCommand::AcceptAlert |
             WebDriverCommand::GetAlertText | WebDriverCommand::ElementClick(_) |
             WebDriverCommand::ElementTap(_) | WebDriverCommand::ElementClear(_) |
-            WebDriverCommand::TakeScreenshot => {
+            WebDriverCommand::TakeScreenshot | WebDriverCommand::DeleteActions => {
                 None
             },
             WebDriverCommand::Get(ref x) => Some(x.to_json()),
@@ -349,6 +357,7 @@ impl <U:WebDriverExtensionRoute> ToJson for WebDriverMessage<U> {
             WebDriverCommand::ExecuteAsyncScript(ref x) => Some(x.to_json()),
             WebDriverCommand::AddCookie(ref x) => Some(x.to_json()),
             WebDriverCommand::SendAlertText(ref x) => Some(x.to_json()),
+            WebDriverCommand::PerformActions(ref x) => Some(x.to_json()),
             WebDriverCommand::Extension(ref x) => x.parameters_json(),
         };
 
@@ -918,6 +927,523 @@ impl ToJson for TakeScreenshotParameters {
     fn to_json(&self) -> Json {
         let mut data = BTreeMap::new();
         data.insert("element".to_string(), self.element.to_json());
+        Json::Object(data)
+    }
+}
+
+#[derive(PartialEq)]
+pub struct ActionsParameters {
+    pub actions: Vec<ActionSequence>
+}
+
+impl Parameters for ActionsParameters {
+    fn from_json(body: &Json) -> WebDriverResult<ActionsParameters> {
+        try_opt!(body.as_object(),
+                 ErrorStatus::InvalidArgument,
+                 "Message body was not an object");
+        let actions = try_opt!(
+            try_opt!(body.find("actions"),
+                     ErrorStatus::InvalidArgument,
+                     "No actions parameter found").as_array(),
+            ErrorStatus::InvalidArgument,
+            "Actions was not an array");
+
+        let mut result = Vec::with_capacity(actions.len());
+        for chain in actions.iter() {
+            result.push(try!(ActionSequence::from_json(chain)));
+        }
+        Ok(ActionsParameters {
+            actions: result
+        })
+    }
+}
+
+impl ToJson for ActionsParameters {
+    fn to_json(&self) -> Json {
+        let mut data = BTreeMap::new();
+        data.insert("actions".to_owned(),
+                    self.actions.iter().map(|x| x.to_json()).collect::<Vec<Json>>().to_json());
+        Json::Object(data)
+    }
+}
+
+#[derive(PartialEq)]
+pub struct ActionSequence {
+    id: Nullable<String>,
+    actions_type: String,
+    actions: Vec<ActionItem>
+}
+
+impl Parameters for ActionSequence {
+    fn from_json(body: &Json) -> WebDriverResult<ActionSequence> {
+        let data = try_opt!(body.as_object(),
+                            ErrorStatus::InvalidArgument,
+                            "Actions chain was not an object");
+
+        let id = match data.get("id") {
+            Some(x) => Some(try_opt!(x.as_string(),
+                                     ErrorStatus::InvalidArgument,
+                                     "id parameter is not a string").to_owned()),
+            None => None
+        };
+
+
+        let actions_type = try_opt!(try_opt!(data.get("type"),
+                                              ErrorStatus::InvalidArgument,
+                                             "type parameter missing").as_string(),
+                                    ErrorStatus::InvalidArgument,
+                                    "type parameter was not a string");
+
+        match actions_type {
+            "key" | "pointer" => {},
+            _ => return Err(WebDriverError::new(ErrorStatus::InvalidArgument,
+                                                "Invalid action type"))
+        }
+
+        let actions_chain = try_opt!(try_opt!(data.get("actions"),
+                                              ErrorStatus::InvalidArgument,
+                                              "actions parameter missing").as_array(),
+                                     ErrorStatus::InvalidArgument,
+                                     "actions parameter was not an array");
+
+        let mut actions = Vec::with_capacity(actions_chain.len());
+        for action_body in actions_chain.iter() {
+            let action = match actions_type {
+                "key" => ActionItem::Key(try!(KeyActionItem::from_json(action_body))),
+                "pointer" => ActionItem::Pointer(try!(PointerActionItem::from_json(action_body))),
+                _ => panic!("Got unexpected action type after checking type")
+            };
+            actions.push(action);
+        };
+        Ok(ActionSequence {
+            id: id.into(),
+            actions_type: actions_type.into(),
+            actions: actions
+        })
+    }
+}
+
+impl ToJson for ActionSequence {
+    fn to_json(&self) -> Json {
+        let mut data: BTreeMap<String, Json> = BTreeMap::new();
+        data.insert("id".into(), self.id.to_json());
+        data.insert("type".into(), self.actions_type.to_json());
+        let actions: Vec<Json> = self.actions.iter().map(|x| x.to_json()).collect();
+        data.insert("actions".into(), actions.to_json());
+        Json::Object(data)
+    }
+}
+
+#[derive(PartialEq)]
+pub enum ActionItem {
+    Key(KeyActionItem),
+    Pointer(PointerActionItem)
+}
+
+impl ToJson for ActionItem {
+    fn to_json(&self) -> Json {
+        match self {
+            &ActionItem::Key(ref x) => x.to_json(),
+            &ActionItem::Pointer(ref x) => x.to_json(),
+        }
+    }
+}
+
+#[derive(PartialEq)]
+pub enum KeyActionItem {
+    General(GeneralAction),
+    Key(KeyAction)
+}
+
+impl Parameters for KeyActionItem {
+    fn from_json(body: &Json) -> WebDriverResult<KeyActionItem> {
+        let data = try_opt!(body.as_object(),
+                            ErrorStatus::InvalidArgument,
+                            "Actions chain was not an object");
+        let type_name = try_opt!(
+            try_opt!(data.get("type"),
+                     ErrorStatus::InvalidArgument,
+                     "Missing required property 'type'").as_string(),
+            ErrorStatus::InvalidArgument,
+            "Type argument was not a string");
+        match type_name {
+            "pause" => Ok(KeyActionItem::General(
+                try!(GeneralAction::from_json(body)))),
+            _ => Ok(KeyActionItem::Key(
+                try!(KeyAction::from_json(body))))
+        }
+    }
+}
+
+impl ToJson for KeyActionItem {
+    fn to_json(&self) -> Json {
+        match self {
+            &KeyActionItem::General(ref x) => x.to_json(),
+            &KeyActionItem::Key(ref x) => x.to_json()
+        }
+    }
+}
+
+#[derive(PartialEq)]
+pub enum PointerActionItem {
+    General(GeneralAction),
+    Pointer(PointerAction)
+}
+
+impl Parameters for PointerActionItem {
+    fn from_json(body: &Json) -> WebDriverResult<PointerActionItem> {
+        let data = try_opt!(body.as_object(),
+                            ErrorStatus::InvalidArgument,
+                            "Actions chain was not an object");
+        let type_name = try_opt!(
+            try_opt!(data.get("type"),
+                     ErrorStatus::InvalidArgument,
+                     "Missing required property 'type'").as_string(),
+            ErrorStatus::InvalidArgument,
+            "Type argument was not a string");
+
+        match type_name {
+            "pause" => Ok(PointerActionItem::General(try!(GeneralAction::from_json(body)))),
+            _ => Ok(PointerActionItem::Pointer(try!(PointerAction::from_json(body))))
+        }
+    }
+}
+
+impl ToJson for PointerActionItem {
+    fn to_json(&self) -> Json {
+        match self {
+            &PointerActionItem::General(ref x) => x.to_json(),
+            &PointerActionItem::Pointer(ref x) => x.to_json()
+        }
+    }
+}
+
+#[derive(PartialEq)]
+pub enum GeneralAction {
+    Pause(PauseAction)
+}
+
+impl Parameters for GeneralAction {
+    fn from_json(body: &Json) -> WebDriverResult<GeneralAction> {
+        match body.find("type").and_then(|x| x.as_string()) {
+            Some("pause") => Ok(GeneralAction::Pause(try!(PauseAction::from_json(body)))),
+            _ => Err(WebDriverError::new(ErrorStatus::InvalidArgument,
+                                         "Invalid or missing type attribute"))
+        }
+    }
+}
+
+impl ToJson for GeneralAction {
+    fn to_json(&self) -> Json {
+        match self {
+            &GeneralAction::Pause(ref x) => x.to_json()
+        }
+    }
+}
+
+#[derive(PartialEq)]
+pub struct PauseAction {
+    pub duration: f64
+}
+
+impl Parameters for PauseAction {
+    fn from_json(body: &Json) -> WebDriverResult<PauseAction> {
+        Ok(PauseAction {
+            duration: try_opt!(
+                try_opt!(body.find("duration"),
+                         ErrorStatus::InvalidArgument,
+                         "Missing duration on pause action").as_f64(),
+                ErrorStatus::InvalidArgument,
+                "Duration is not a number")
+        })
+    }
+}
+
+impl ToJson for PauseAction {
+    fn to_json(&self) -> Json {
+        let mut data = BTreeMap::new();
+        data.insert("type".to_owned(),
+                    "pause".to_json());
+        data.insert("duration".to_owned(),
+                    self.duration.to_json());
+        Json::Object(data)
+    }
+}
+
+#[derive(PartialEq)]
+pub enum KeyAction {
+    Up(KeyUpAction),
+    Down(KeyDownAction)
+}
+
+impl Parameters for KeyAction {
+    fn from_json(body: &Json) -> WebDriverResult<KeyAction> {
+        match body.find("type").and_then(|x| x.as_string()) {
+            Some("keyDown") => Ok(KeyAction::Down(try!(KeyDownAction::from_json(body)))),
+            Some("keyUp") => Ok(KeyAction::Up(try!(KeyUpAction::from_json(body)))),
+            Some(_) | None => Err(WebDriverError::new(ErrorStatus::InvalidArgument,
+                                                      "Invalid type attribute value for key action"))
+        }
+    }
+}
+
+impl ToJson for KeyAction {
+    fn to_json(&self) -> Json {
+        match self {
+            &KeyAction::Down(ref x) => x.to_json(),
+            &KeyAction::Up(ref x) => x.to_json(),
+        }
+    }
+}
+
+#[derive(PartialEq)]
+pub struct KeyUpAction {
+    pub value: char
+}
+
+impl Parameters for KeyUpAction {
+    fn from_json(body: &Json) -> WebDriverResult<KeyUpAction> {
+        let value_str = try_opt!(
+                try_opt!(body.find("value"),
+                         ErrorStatus::InvalidArgument,
+                         "Missing value on keyUp action").as_string(),
+                ErrorStatus::InvalidArgument,
+            "Value is not a string");
+        if value_str.len() != 1 {
+            return Err(WebDriverError::new(
+                ErrorStatus::InvalidArgument,
+                "Key code was not a single char"))
+        }
+
+        let value = value_str.chars().next().unwrap();
+        Ok(KeyUpAction {
+            value: value
+        })
+    }
+}
+
+impl ToJson for KeyUpAction {
+    fn to_json(&self) -> Json {
+        let mut data = BTreeMap::new();
+        data.insert("type".to_owned(),
+                    "keyUp".to_json());
+        data.insert("value".to_string(),
+                    self.value.to_string().to_json());
+        Json::Object(data)
+    }
+}
+
+#[derive(PartialEq)]
+pub struct KeyDownAction {
+    pub value: char
+}
+
+impl Parameters for KeyDownAction {
+    fn from_json(body: &Json) -> WebDriverResult<KeyDownAction> {
+        let value_str = try_opt!(
+                try_opt!(body.find("value"),
+                         ErrorStatus::InvalidArgument,
+                         "Missing value on keyDown action").as_string(),
+                ErrorStatus::InvalidArgument,
+            "Value is not a string");
+        if value_str.len() != 1 {
+            return Err(WebDriverError::new(
+                ErrorStatus::InvalidArgument,
+                "Key code was not a single char"))
+        }
+
+        let value = value_str.chars().next().unwrap();
+        Ok(KeyDownAction {
+            value: value
+        })
+    }
+}
+
+impl ToJson for KeyDownAction {
+    fn to_json(&self) -> Json {
+        let mut data = BTreeMap::new();
+        data.insert("type".to_owned(),
+                    "keyUp".to_json());
+        data.insert("value".to_owned(),
+                    self.value.to_string().to_json());
+        Json::Object(data)
+    }
+}
+
+#[derive(PartialEq)]
+pub enum PointerAction {
+    Up(PointerUpAction),
+    Down(PointerDownAction),
+    Move(PointerMoveAction),
+    Cancel
+}
+
+impl Parameters for PointerAction {
+    fn from_json(body: &Json) -> WebDriverResult<PointerAction> {
+        match body.find("type").and_then(|x| x.as_string()) {
+            Some("pointerUp") => Ok(PointerAction::Up(try!(PointerUpAction::from_json(body)))),
+            Some("pointerDown") => Ok(PointerAction::Down(try!(PointerDownAction::from_json(body)))),
+            Some("move") => Ok(PointerAction::Move(try!(PointerMoveAction::from_json(body)))),
+            Some("cancel") => Ok(PointerAction::Cancel),
+            Some(_) | None => Err(WebDriverError::new(
+                ErrorStatus::InvalidArgument,
+                "Missing or invalid type argument for pointer action"))
+        }
+    }
+}
+
+impl ToJson for PointerAction {
+    fn to_json(&self) -> Json {
+        match self {
+            &PointerAction::Down(ref x) => x.to_json(),
+            &PointerAction::Up(ref x) => x.to_json(),
+            &PointerAction::Move(ref x) => x.to_json(),
+            &PointerAction::Cancel => {
+                let mut data = BTreeMap::new();
+                data.insert("type".to_owned(),
+                            "cancel".to_json());
+                Json::Object(data)
+            }
+        }
+    }
+}
+
+#[derive(PartialEq)]
+pub struct PointerUpAction {
+    button: u64,
+}
+
+impl Parameters for PointerUpAction {
+    fn from_json(body: &Json) -> WebDriverResult<PointerUpAction> {
+        let button = try_opt!(
+            try_opt!(body.find("button"),
+                     ErrorStatus::InvalidArgument,
+                     "Missing button specifier").as_u64(),
+            ErrorStatus::InvalidArgument,
+            "button is not a positive integer");
+
+        Ok(PointerUpAction {
+            button: button
+        })
+    }
+}
+
+impl ToJson for PointerUpAction {
+    fn to_json(&self) -> Json {
+        let mut data = BTreeMap::new();
+        data.insert("type".to_owned(),
+                    "pointerUp".to_json());
+        data.insert("button".to_owned(), self.button.to_json());
+        Json::Object(data)
+    }
+}
+
+#[derive(PartialEq)]
+pub struct PointerDownAction {
+    element: Nullable<WebElement>,
+    button: u64,
+    x: Nullable<u64>,
+    y: Nullable<u64>
+}
+
+impl Parameters for PointerDownAction {
+    fn from_json(body: &Json) -> WebDriverResult<PointerDownAction> {
+        let element = match body.find("element") {
+            Some(elem) => Some(try!(WebElement::from_json(elem))),
+            None => None
+
+        };
+        let button = try_opt!(
+            try_opt!(body.find("button"),
+                     ErrorStatus::InvalidArgument,
+                     "Missing button specifier").as_u64(),
+            ErrorStatus::InvalidArgument,
+            "button is not a positive integer");
+
+        let x = match body.find("x") {
+            Some(x) => {
+                Some(try_opt!(x.as_u64(),
+                              ErrorStatus::InvalidArgument,
+                              "x is not a number"))
+            },
+            None => None
+        };
+
+        let y = match body.find("y") {
+            Some(y) => {
+                Some(try_opt!(y.as_u64(),
+                              ErrorStatus::InvalidArgument,
+                              "y is not a number"))
+            },
+            None => None
+        };
+
+        Ok(PointerDownAction {
+            element: element.into(),
+            button: button,
+            x: x.into(),
+            y: y.into(),
+        })
+    }
+}
+
+impl ToJson for PointerDownAction {
+    fn to_json(&self) -> Json {
+        let mut data = BTreeMap::new();
+        data.insert("type".to_owned(),
+                    "pointerDown".to_json());
+        data.insert("button".to_owned(), self.button.to_json());
+        Json::Object(data)
+    }
+}
+
+#[derive(PartialEq)]
+pub struct PointerMoveAction {
+    element: Nullable<WebElement>,
+    x: Nullable<u64>,
+    y: Nullable<u64>
+}
+
+impl Parameters for PointerMoveAction {
+    fn from_json(body: &Json) -> WebDriverResult<PointerMoveAction> {
+        let element = match body.find("element") {
+            Some(elem) => Some(try!(WebElement::from_json(elem))),
+            None => None
+
+        };
+
+        let x = match body.find("x") {
+            Some(x) => {
+                Some(try_opt!(x.as_u64(),
+                              ErrorStatus::InvalidArgument,
+                              "x is not a number"))
+            },
+            None => None
+        };
+
+        let y = match body.find("y") {
+            Some(y) => {
+                Some(try_opt!(y.as_u64(),
+                              ErrorStatus::InvalidArgument,
+                              "y is not a number"))
+            },
+            None => None
+        };
+
+        Ok(PointerMoveAction {
+            element: element.into(),
+            x: x.into(),
+            y: y.into(),
+        })
+    }
+}
+
+impl ToJson for PointerMoveAction {
+    fn to_json(&self) -> Json {
+        let mut data = BTreeMap::new();
+        data.insert("type".to_owned(), "pointerMove".to_json());
+        data.insert("x".to_owned(), self.x.to_json());
+        data.insert("y".to_owned(), self.y.to_json());
         Json::Object(data)
     }
 }

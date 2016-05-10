@@ -58,6 +58,8 @@ fn standard_routes<U:WebDriverExtensionRoute>() -> Vec<(Method, &'static str, Ro
                 (Get, "/session/{sessionId}/alert/text", Route::GetAlertText),
                 (Post, "/session/{sessionId}/alert/text", Route::SendAlertText),
                 (Get, "/session/{sessionId}/screenshot", Route::TakeScreenshot),
+                (Post, "/session/{sessionId}/actions", Route::PerformActions),
+                (Delete, "/session/{sessionId}/actions", Route::DeleteActions),
                 // TODO Remove this when > v0.5 is released. There for compatibility reasons with existing
                 //      Webdriver implementations.
                 (Get, "/session/{sessionId}/alert_text", Route::GetAlertText),
@@ -112,11 +114,12 @@ pub enum Route<U:WebDriverExtensionRoute> {
     DeleteCookies,
     DeleteCookie,
     SetTimeouts,
-    //Actions XXX - once I understand the spec, perhaps
     ElementClick,
     ElementTap,
     ElementClear,
     ElementSendKeys,
+    PerformActions,
+    DeleteActions,
     DismissAlert,
     AcceptAlert,
     GetAlertText,
