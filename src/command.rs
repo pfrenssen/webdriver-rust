@@ -1,10 +1,10 @@
-use regex::Captures;
-use rustc_serialize::json::{ToJson, Json};
-use std::collections::BTreeMap;
-
 use common::{Date, Nullable, WebElement, FrameId, LocatorStrategy};
 use error::{WebDriverResult, WebDriverError, ErrorStatus};
 use httpapi::{Route, WebDriverExtensionRoute, VoidWebDriverExtensionRoute};
+use regex::Captures;
+use rustc_serialize::json::{ToJson, Json};
+use std::collections::BTreeMap;
+use std::default::Default;
 
 
 #[derive(PartialEq)]
@@ -893,7 +893,7 @@ impl Parameters for SendAlertTextParameters {
 impl ToJson for SendAlertTextParameters {
     fn to_json(&self) -> Json {
         let mut data = BTreeMap::new();
-        data.insert("message".to_string(), self.message.to_json());
+        data.insert("message".to_owned(), self.message.to_json());
         Json::Object(data)
     }
 }
@@ -969,9 +969,8 @@ impl ToJson for ActionsParameters {
 
 #[derive(PartialEq)]
 pub struct ActionSequence {
-    id: Nullable<String>,
-    actions_type: String,
-    actions: Vec<ActionItem>
+    pub id: Nullable<String>,
+    pub actions: ActionsType
 }
 
 impl Parameters for ActionSequence {
@@ -987,37 +986,20 @@ impl Parameters for ActionSequence {
             None => None
         };
 
+        let type_name = try_opt!(try_opt!(data.get("type"),
+                                          ErrorStatus::InvalidArgument,
+                                          "type parameter missing").as_string(),
+                                 ErrorStatus::InvalidArgument,
+                                 "type parameter was not a string");
 
-        let actions_type = try_opt!(try_opt!(data.get("type"),
-                                              ErrorStatus::InvalidArgument,
-                                             "type parameter missing").as_string(),
-                                    ErrorStatus::InvalidArgument,
-                                    "type parameter was not a string");
-
-        match actions_type {
-            "key" | "pointer" => {},
+        let actions = match type_name {
+            "key" | "pointer" => try!(ActionsType::from_json(&body)),
             _ => return Err(WebDriverError::new(ErrorStatus::InvalidArgument,
                                                 "Invalid action type"))
-        }
-
-        let actions_chain = try_opt!(try_opt!(data.get("actions"),
-                                              ErrorStatus::InvalidArgument,
-                                              "actions parameter missing").as_array(),
-                                     ErrorStatus::InvalidArgument,
-                                     "actions parameter was not an array");
-
-        let mut actions = Vec::with_capacity(actions_chain.len());
-        for action_body in actions_chain.iter() {
-            let action = match actions_type {
-                "key" => ActionItem::Key(try!(KeyActionItem::from_json(action_body))),
-                "pointer" => ActionItem::Pointer(try!(PointerActionItem::from_json(action_body))),
-                _ => panic!("Got unexpected action type after checking type")
-            };
-            actions.push(action);
         };
+
         Ok(ActionSequence {
             id: id.into(),
-            actions_type: actions_type.into(),
             actions: actions
         })
     }
@@ -1027,25 +1009,131 @@ impl ToJson for ActionSequence {
     fn to_json(&self) -> Json {
         let mut data: BTreeMap<String, Json> = BTreeMap::new();
         data.insert("id".into(), self.id.to_json());
-        data.insert("type".into(), self.actions_type.to_json());
-        let actions: Vec<Json> = self.actions.iter().map(|x| x.to_json()).collect();
+        let (action_type, actions) = match self.actions {
+            ActionsType::Key(ref actions) => {
+                ("key",
+                 actions.iter().map(|x| x.to_json()).collect::<Vec<Json>>())
+            }
+            ActionsType::Pointer(ref parameters, ref actions) => {
+                data.insert("parameters".into(), parameters.to_json());
+                ("pointer",
+                 actions.iter().map(|x| x.to_json()).collect::<Vec<Json>>())
+            }
+        };
+        data.insert("type".into(), action_type.to_json());
         data.insert("actions".into(), actions.to_json());
         Json::Object(data)
     }
 }
 
 #[derive(PartialEq)]
-pub enum ActionItem {
-    Key(KeyActionItem),
-    Pointer(PointerActionItem)
+pub enum ActionsType {
+    Key(Vec<KeyActionItem>),
+    Pointer(PointerActionParameters, Vec<PointerActionItem>)
 }
 
-impl ToJson for ActionItem {
+impl Parameters for ActionsType {
+    fn from_json(body: &Json) -> WebDriverResult<ActionsType> {
+        // These unwraps are OK as long as this is only called from ActionSequence::from_json
+        let data = body.as_object().expect("Body should be a JSON Object");
+        let actions_type = body.find("type").and_then(|x| x.as_string()).expect("Type should be a string");
+        let actions_chain = try_opt!(try_opt!(data.get("actions"),
+                                              ErrorStatus::InvalidArgument,
+                                              "actions parameter missing").as_array(),
+                                     ErrorStatus::InvalidArgument,
+                                     "actions parameter was not an array");
+        match actions_type {
+            "key" => {
+                let mut actions = Vec::with_capacity(actions_chain.len());
+                for action_body in actions_chain.iter() {
+                    actions.push(try!(KeyActionItem::from_json(action_body)));
+                };
+                Ok(ActionsType::Key(actions))
+            },
+            "pointer" => {
+                let mut actions = Vec::with_capacity(actions_chain.len());
+                let parameters = match data.get("parameters") {
+                    Some(x) => try!(PointerActionParameters::from_json(x)),
+                    None => Default::default()
+                };
+
+                for action_body in actions_chain.iter() {
+                    actions.push(try!(PointerActionItem::from_json(action_body)));
+                }
+                Ok(ActionsType::Pointer(parameters, actions))
+            }
+            _ => panic!("Got unexpected action type after checking type")
+        }
+    }
+}
+
+#[derive(PartialEq)]
+pub enum PointerType {
+    Mouse,
+    Pen,
+    Touch,
+}
+
+impl Parameters for PointerType {
+    fn from_json(body: &Json) -> WebDriverResult<PointerType> {
+        match body.as_string() {
+            Some("mouse") => Ok(PointerType::Mouse),
+            Some("pen") => Ok(PointerType::Pen),
+            Some("touch") => Ok(PointerType::Touch),
+            Some(_) => Err(WebDriverError::new(
+                ErrorStatus::InvalidArgument,
+                "Unsupported pointer type"
+            )),
+            None => Err(WebDriverError::new(
+                ErrorStatus::InvalidArgument,
+                "Pointer type was not a string"
+            ))
+        }
+    }
+}
+
+impl ToJson for PointerType {
     fn to_json(&self) -> Json {
         match self {
-            &ActionItem::Key(ref x) => x.to_json(),
-            &ActionItem::Pointer(ref x) => x.to_json(),
-        }
+            &PointerType::Mouse => "mouse".to_json(),
+            &PointerType::Pen => "pen".to_json(),
+            &PointerType::Touch => "touch".to_json(),
+        }.to_json()
+    }
+}
+
+impl Default for PointerType {
+    fn default() -> PointerType {
+        PointerType::Mouse
+    }
+}
+
+#[derive(Default, PartialEq)]
+pub struct PointerActionParameters {
+    pointer_type: PointerType
+}
+
+impl Parameters for PointerActionParameters {
+    fn from_json(body: &Json) -> WebDriverResult<PointerActionParameters> {
+        let data = try_opt!(body.as_object(),
+                            ErrorStatus::InvalidArgument,
+                            "parameters was not an object");
+        let pointer_type = match data.get("pointerType") {
+            Some(x) => try!(PointerType::from_json(x)),
+            None => PointerType::default()
+        };
+        Ok(PointerActionParameters {
+            pointer_type: pointer_type
+        })
+    }
+}
+
+impl ToJson for PointerActionParameters {
+    fn to_json(&self) -> Json {
+        let mut data = BTreeMap::new();
+        data.insert("pointerType".to_owned(),
+                    self.pointer_type.to_json());
+        Json::Object(data)
     }
 }
 
@@ -1310,7 +1398,7 @@ impl ToJson for PointerAction {
 
 #[derive(PartialEq)]
 pub struct PointerUpAction {
-    button: u64,
+    pub button: u64,
 }
 
 impl Parameters for PointerUpAction {
@@ -1340,10 +1428,10 @@ impl ToJson for PointerUpAction {
 
 #[derive(PartialEq)]
 pub struct PointerDownAction {
-    element: Nullable<WebElement>,
-    button: u64,
-    x: Nullable<u64>,
-    y: Nullable<u64>
+    pub element: Nullable<WebElement>,
+    pub button: u64,
+    pub x: Nullable<u64>,
+    pub y: Nullable<u64>
 }
 
 impl Parameters for PointerDownAction {
@@ -1399,9 +1487,9 @@ impl ToJson for PointerDownAction {
 
 #[derive(PartialEq)]
 pub struct PointerMoveAction {
-    element: Nullable<WebElement>,
-    x: Nullable<u64>,
-    y: Nullable<u64>
+    pub element: Nullable<WebElement>,
+    pub x: Nullable<u64>,
+    pub y: Nullable<u64>
 }
 
 impl Parameters for PointerMoveAction {
