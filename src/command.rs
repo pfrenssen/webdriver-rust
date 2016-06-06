@@ -1110,7 +1110,7 @@ impl Default for PointerType {
 
 #[derive(Default, PartialEq)]
 pub struct PointerActionParameters {
-    pointer_type: PointerType
+    pub pointer_type: PointerType
 }
 
 impl Parameters for PointerActionParameters {
