@@ -21,8 +21,10 @@ pub enum WebDriverCommand<T: WebDriverExtensionCommand> {
     GetWindowHandle,
     GetWindowHandles,
     Close,
-    SetWindowSize(WindowSizeParameters),
     GetWindowSize,
+    SetWindowSize(WindowSizeParameters),
+    GetWindowPosition,
+    SetWindowPosition(WindowPositionParameters),
     MaximizeWindow,
 //    FullscreenWindow // Not supported in marionette
     SwitchToWindow(SwitchToWindowParameters),
@@ -36,6 +38,7 @@ pub enum WebDriverCommand<T: WebDriverExtensionCommand> {
     IsDisplayed(WebElement),
     IsSelected(WebElement),
     GetElementAttribute(WebElement, String),
+    GetElementProperty(WebElement, String),
     GetCSSValue(WebElement, String),
     GetElementText(WebElement),
     GetElementTagName(WebElement),
@@ -58,7 +61,7 @@ pub enum WebDriverCommand<T: WebDriverExtensionCommand> {
     DismissAlert,
     AcceptAlert,
     GetAlertText,
-    SendAlertText(SendAlertTextParameters),
+    SendAlertText(SendKeysParameters),
     TakeScreenshot,
     Extension(T)
 }
@@ -127,11 +130,16 @@ impl <U: WebDriverExtensionRoute> WebDriverMessage<U> {
                 let parameters: TimeoutsParameters = try!(Parameters::from_json(&body_data));
                 WebDriverCommand::SetTimeouts(parameters)
             },
+            Route::GetWindowSize => WebDriverCommand::GetWindowSize,
             Route::SetWindowSize => {
                 let parameters: WindowSizeParameters = try!(Parameters::from_json(&body_data));
                 WebDriverCommand::SetWindowSize(parameters)
             },
-            Route::GetWindowSize => WebDriverCommand::GetWindowSize,
+            Route::GetWindowPosition => WebDriverCommand::GetWindowPosition,
+            Route::SetWindowPosition => {
+                let parameters: WindowPositionParameters = try!(Parameters::from_json(&body_data));
+                WebDriverCommand::SetWindowPosition(parameters)
+            },
             Route::MaximizeWindow => WebDriverCommand::MaximizeWindow,
             Route::SwitchToWindow => {
                 let parameters: SwitchToWindowParameters = try!(Parameters::from_json(&body_data));
@@ -190,6 +198,16 @@ impl <U: WebDriverExtensionRoute> WebDriverMessage<U> {
                                     ErrorStatus::InvalidArgument,
                                     "Missing name parameter").to_string();
                 WebDriverCommand::GetElementAttribute(element, attr)
+            },
+            Route::GetElementProperty => {
+                let element_id = try_opt!(params.name("elementId"),
+                                          ErrorStatus::InvalidArgument,
+                                          "Missing elementId parameter");
+                let element = WebElement::new(element_id.to_string());
+                let property = try_opt!(params.name("name"),
+                                        ErrorStatus::InvalidArgument,
+                                        "Missing name parameter").to_string();
+                WebDriverCommand::GetElementProperty(element, property)
             },
             Route::GetCSSValue => {
                 let element_id = try_opt!(params.name("elementId"),
@@ -305,7 +323,7 @@ impl <U: WebDriverExtensionRoute> WebDriverMessage<U> {
                 WebDriverCommand::GetAlertText
             },
             Route::SendAlertText => {
-                let parameters: SendAlertTextParameters = try!(Parameters::from_json(&body_data));
+                let parameters: SendKeysParameters = try!(Parameters::from_json(&body_data));
                 WebDriverCommand::SendAlertText(parameters)
             },
             Route::TakeScreenshot => WebDriverCommand::TakeScreenshot,
@@ -325,27 +343,48 @@ impl <U:WebDriverExtensionRoute> ToJson for WebDriverMessage<U> {
     fn to_json(&self) -> Json {
         let parameters = match self.command {
             WebDriverCommand::NewSession(_) |
-            WebDriverCommand::DeleteSession | WebDriverCommand::GetCurrentUrl |
-            WebDriverCommand::GoBack | WebDriverCommand::GoForward | WebDriverCommand::Refresh |
-            WebDriverCommand::GetTitle | WebDriverCommand::GetPageSource |
-            WebDriverCommand::GetWindowHandle | WebDriverCommand::GetWindowHandles |
-            WebDriverCommand::Close | WebDriverCommand::GetWindowSize | WebDriverCommand::MaximizeWindow |
-            WebDriverCommand::SwitchToParentFrame | WebDriverCommand::GetActiveElement |
-            WebDriverCommand::IsDisplayed(_) | WebDriverCommand::IsSelected(_) |
-            WebDriverCommand::GetElementAttribute(_, _) | WebDriverCommand::GetCSSValue(_, _) |
-            WebDriverCommand::GetElementText(_) | WebDriverCommand::GetElementTagName(_) |
-            WebDriverCommand::GetElementRect(_) | WebDriverCommand::IsEnabled(_) |
-            WebDriverCommand::GetCookies | WebDriverCommand::GetCookie(_) |
-            WebDriverCommand::DeleteCookies | WebDriverCommand::DeleteCookie(_) |
-            WebDriverCommand::DismissAlert | WebDriverCommand::AcceptAlert |
-            WebDriverCommand::GetAlertText | WebDriverCommand::ElementClick(_) |
-            WebDriverCommand::ElementTap(_) | WebDriverCommand::ElementClear(_) |
-            WebDriverCommand::TakeScreenshot | WebDriverCommand::DeleteActions => {
+            WebDriverCommand::DeleteSession |
+            WebDriverCommand::GetCurrentUrl |
+            WebDriverCommand::GoBack |
+            WebDriverCommand::GoForward |
+            WebDriverCommand::Refresh |
+            WebDriverCommand::GetTitle |
+            WebDriverCommand::GetPageSource |
+            WebDriverCommand::GetWindowHandle |
+            WebDriverCommand::GetWindowHandles |
+            WebDriverCommand::Close |
+            WebDriverCommand::GetWindowSize |
+            WebDriverCommand::GetWindowPosition |
+            WebDriverCommand::MaximizeWindow |
+            WebDriverCommand::SwitchToParentFrame |
+            WebDriverCommand::GetActiveElement |
+            WebDriverCommand::IsDisplayed(_) |
+            WebDriverCommand::IsSelected(_) |
+            WebDriverCommand::GetElementAttribute(_, _) |
+            WebDriverCommand::GetElementProperty(_, _) |
+            WebDriverCommand::GetCSSValue(_, _) |
+            WebDriverCommand::GetElementText(_) |
+            WebDriverCommand::GetElementTagName(_) |
+            WebDriverCommand::GetElementRect(_) |
+            WebDriverCommand::IsEnabled(_) |
+            WebDriverCommand::GetCookies |
+            WebDriverCommand::GetCookie(_) |
+            WebDriverCommand::DeleteCookies |
+            WebDriverCommand::DeleteCookie(_) |
+            WebDriverCommand::DismissAlert |
+            WebDriverCommand::AcceptAlert |
+            WebDriverCommand::GetAlertText |
+            WebDriverCommand::ElementClick(_) |
+            WebDriverCommand::ElementTap(_) |
+            WebDriverCommand::ElementClear(_) |
+            WebDriverCommand::TakeScreenshot |
+            WebDriverCommand::DeleteActions => {
                 None
             },
             WebDriverCommand::Get(ref x) => Some(x.to_json()),
             WebDriverCommand::SetTimeouts(ref x) => Some(x.to_json()),
             WebDriverCommand::SetWindowSize(ref x) => Some(x.to_json()),
+            WebDriverCommand::SetWindowPosition(ref x) => Some(x.to_json()),
             WebDriverCommand::SwitchToWindow(ref x) => Some(x.to_json()),
             WebDriverCommand::SwitchToFrame(ref x) => Some(x.to_json()),
             WebDriverCommand::FindElement(ref x) => Some(x.to_json()),
@@ -381,8 +420,17 @@ pub struct NewSessionParameters {
 
 impl NewSessionParameters {
     pub fn get(&self, name: &str) -> Option<&Json> {
-        debug!("Getting {} from capabilities", name);
         self.required.get(name).or_else(|| self.desired.get(name))
+    }
+
+    pub fn consume(&mut self, name: &str) -> Option<Json> {
+        let required = self.required.remove(name);
+        let desired = self.desired.remove(name);
+        if required.is_some() {
+            required
+        } else {
+            desired
+        }
     }
 }
 
@@ -497,7 +545,7 @@ impl ToJson for TimeoutsParameters {
 #[derive(PartialEq)]
 pub struct WindowSizeParameters {
     pub width: u64,
-    pub height: u64
+    pub height: u64,
 }
 
 impl Parameters for WindowSizeParameters {
@@ -528,6 +576,38 @@ impl ToJson for WindowSizeParameters {
         let mut data = BTreeMap::new();
         data.insert("width".to_string(), self.width.to_json());
         data.insert("height".to_string(), self.height.to_json());
+        Json::Object(data)
+    }
+}
+
+#[derive(PartialEq)]
+pub struct WindowPositionParameters {
+    pub x: u64,
+    pub y: u64,
+}
+
+impl Parameters for WindowPositionParameters {
+    fn from_json(body: &Json) -> WebDriverResult<WindowPositionParameters> {
+        let data = try_opt!(body.as_object(),
+            ErrorStatus::UnknownError, "Message body was not an object");
+        let xv = try_opt!(data.get("x"),
+            ErrorStatus::InvalidArgument, "Missing 'x' parameters");
+        let x = try_opt!(xv.as_u64(),
+            ErrorStatus::InvalidArgument, "'x' is not a positive integer");
+        let yv = try_opt!(data.get("y"),
+            ErrorStatus::InvalidArgument, "Missing 'y' parameters");
+        let y = try_opt!(yv.as_u64(),
+            ErrorStatus::InvalidArgument, "'y' is not a positive integer");
+        return Ok(WindowPositionParameters { x: x, y: y });
+    }
+}
+
+
+impl ToJson for WindowPositionParameters {
+    fn to_json(&self) -> Json {
+        let mut data = BTreeMap::new();
+        data.insert("x".to_string(), self.x.to_json());
+        data.insert("y".to_string(), self.y.to_json());
         Json::Object(data)
     }
 }
